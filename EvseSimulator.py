@@ -8,15 +8,15 @@ import time
 
 
 class Device:
-    def __init__(self, name, min_draw, max_draw, is_ev, priority, system):
+    def __init__(self, name, min_amp_draw, max_amp_draw, is_ev, weight, system):
         self.name = name
-        self.min_draw = min_draw
-        self.max_draw = max_draw
-        self.priority = priority
-        self.system = system
-        self.is_ev = is_ev
-        self.current_draw = 0
-        self.desired_draw = 0
+        self.min_amp_draw: int = min_amp_draw
+        self.max_amp_draw: int = max_amp_draw or min_amp_draw
+        self.weight: int = weight
+        self.system: DeviceSimulatorApp = system
+        self.is_ev: bool = is_ev
+        self.current_amp_draw: int = 0
+        self.desired_amp_draw: int = 0
         self.is_on = False
         self.wait_cycles = 0
         self.lock = threading.Lock()
@@ -24,87 +24,85 @@ class Device:
     def set_draw(self):
         with self.lock:
             if not self.is_on:
-                self.current_draw = 0  # Ensure no power is drawn if device is off
-                self.desired_draw = 0
+                self.current_amp_draw = 0  # Ensure no power is drawn if device is off
+                self.desired_amp_draw = 0
                 self.wait_cycles = 0
                 return
 
             if self.is_ev:  # EV-specific behavior
-                available_power = self.system.total_power - self.system.poll_meter()
-                if self.current_draw == 0:  # Not drawing power yet
-                    if available_power >= self.min_draw:
-                        self.desired_draw = min(self.max_draw, available_power)
-                        self.wait_cycles += 1
-                        if self.wait_cycles >= max(
-                            self.min_draw, self.priority
-                        ):  # Wait enough cycles for power to be consistently available
-                            self.current_draw = self.min_draw
-                            self.wait_cycles = 0
-                    else:
-                        self.desired_draw = 0
-                        self.wait_cycles = (
-                            0  # Reset wait cycles if power is insufficient
-                        )
+                available_amps = self.system.total_amps - self.system.poll_meter()
+                if self.current_amp_draw == 0:  # Not drawing power yet
+                    if available_amps >= self.min_amp_draw:
+                        self.desired_amp_draw = min(self.max_amp_draw, available_amps)
+                        self.current_amp_draw = self.min_amp_draw
                 else:  # Already drawing power
-                    if available_power < 0:  # EVs shed load to accommodate
-                        # Account for priority before shedding load
-                        alpha = 1
-                        beta = (self.priority / 2) ** 2 if self.priority else 1
-                        # delay_value = random.betavariate(alpha, beta)
+                    if available_amps < 0:  # EVs shed load to accommodate
+                        available_amps = (
+                            self.system.total_amps - self.system.poll_meter()
+                        )
+                        overdraw = abs(available_amps)
                         max_delay = 3
-                        delay_value = (beta / (beta + alpha)) * (
-                            1 / (1 + (self.priority or 1))
-                        )
-                        time.sleep(delay_value * max_delay)
-
-                        available_power = (
-                            self.system.total_power - self.system.poll_meter()
-                        )
-                        overdraw = abs(available_power)
-                        shed_amount = min(overdraw, self.current_draw)
-                        self.current_draw -= shed_amount
-                        if self.current_draw < self.min_draw:
-                            self.current_draw = (
-                                0  # If shedding drops below minimum, draw 0
-                            )
-                    else:
-                        available_power = (
-                            self.system.total_power - self.system.poll_meter()
-                        )
-                        self.desired_draw = min(
-                            self.max_draw,
-                            self.current_draw + available_power,
-                        )
-                        increase = min(1, available_power)
-                        if (
-                            increase > 0
-                            and self.wait_cycles >= self.priority
-                            and self.current_draw < self.max_draw
-                        ):
-                            self.current_draw += increase
+                        if self.wait_cycles > max_delay:
+                            shed_amount = min(overdraw, self.current_amp_draw)
                             self.wait_cycles = 0
                         else:
+                            overdraw_pct = overdraw / self.system.total_amps
+                            weight_pct = self.weight / self.system.total_amps
+
+                            # Shed my weighted portion of the percent the system is over
+                            weighted_shed_amps = overdraw * (1 - weight_pct)
+
+                            shed_amount = max(1, weighted_shed_amps)
                             self.wait_cycles += 1
 
+                        self.desired_amp_draw = max(0, self.current_amp_draw - overdraw)
+                        self.current_amp_draw -= shed_amount
+                        if self.current_amp_draw < self.min_amp_draw:
+                            self.desired_amp_draw = 0
+                            self.current_amp_draw = 0
+                    elif (
+                        available_amps > 0 and self.current_amp_draw < self.max_amp_draw
+                    ):  # Power is available, increase demand
+                        self.desired_amp_draw = min(
+                            self.max_amp_draw,
+                            self.current_amp_draw + available_amps,
+                        )
+
+                        weight_pct = self.weight / self.system.total_amps
+                        desired_pct = self.desired_amp_draw / self.current_amp_draw
+                        weighted_increase_amps = (
+                            available_amps * desired_pct * weight_pct
+                        )
+
+                        increase = max(1, weighted_increase_amps)
+                        self.current_amp_draw += increase
+                        if self.current_amp_draw > self.max_amp_draw:
+                            self.current_amp_draw = self.max_amp_draw
+                    elif available_amps == 0:
+                        self.desired_amp_draw = self.current_amp_draw
+
+                    self.current_amp_draw = int(self.current_amp_draw)
+                    self.desired_amp_draw = int(self.desired_amp_draw)
+
             else:  # Non-EV behavior
-                if self.current_draw == 0:
-                    self.current_draw = self.min_draw
-                    self.desired_draw = self.min_draw
+                if self.current_amp_draw == 0:
+                    self.current_amp_draw = self.min_amp_draw
+                    self.desired_amp_draw = self.min_amp_draw
 
     def run(self):
         while True:
             self.set_draw()
-            if self.is_ev:
-                time.sleep(random.uniform(0.8, 1.2))
+            if self.is_ev and self.is_on:
+                time.sleep(random.uniform(0.95, 1.05))
             else:
                 time.sleep(0.1)  # Non-EVs turn on an off quickly
 
 
 class DeviceSimulatorApp(App):
-    def __init__(self, total_power, **kwargs):
+    def __init__(self, total_amps, **kwargs):
         super().__init__(**kwargs)
-        self.devices = []
-        self.total_power = total_power
+        self.devices: List[Device] = []
+        self.total_amps: int = total_amps
         self.interaction_log = []
 
     def add_device(self, device):
@@ -128,10 +126,10 @@ class DeviceSimulatorApp(App):
         table = self.query_one("#device_table", DataTable)
         table.add_column("Device")
         table.add_column("Status", key="status")
-        table.add_column("Current Power (kW)", key="kW")
-        table.add_column("Min Draw (kW)", key="min_draw")
-        table.add_column("Desired Draw (kW)", key="desired_draw")
-        table.add_column("Max Draw (kW)", key="max_draw")
+        table.add_column("Current (A)", key="A")
+        table.add_column("Min (A)", key="min_draw")
+        table.add_column("Desired (A)", key="desired_draw")
+        table.add_column("Max (A)", key="max_draw")
         table.add_column("Priority", key="priority")
         self.update_device_table()
 
@@ -147,19 +145,17 @@ class DeviceSimulatorApp(App):
 
         for device in self.devices:
             status = "ON" if device.is_on else "OFF"
-            current_draw_str = f"{device.current_draw} kW"
-            min_draw_str = f"{device.min_draw} kW"
-            desired_draw_str = f"{device.desired_draw} kW"
-            max_draw_str = f"{device.max_draw} kW"
-            priority_str = (
-                f"{device.priority}" if device.priority is not None else "N/A"
-            )
+            current_draw_str = f"{device.current_amp_draw} A"
+            min_draw_str = f"{device.min_amp_draw} A"
+            desired_draw_str = f"{device.desired_amp_draw} A"
+            max_draw_str = f"{device.max_amp_draw} A"
+            priority_str = f"{device.weight}" if device.weight is not None else "N/A"
 
             try:
                 _ = table.get_row_index(device.name)
                 # Update existing row
                 table.update_cell(
-                    row_key=device.name, column_key="kW", value=current_draw_str
+                    row_key=device.name, column_key="A", value=current_draw_str
                 )
                 table.update_cell(
                     row_key=device.name, column_key="status", value=status
@@ -191,12 +187,12 @@ class DeviceSimulatorApp(App):
                     key=device.name,
                 )
 
-    def update_power_info(self):
-        total_draw = self.poll_meter()
-        power_info = self.query_one("#power_info", Static)
-        power_info.update(
-            f"Total Power Available: {self.total_power} kW\n"
-            f"Total Power Draw: {total_draw} kW"
+    def update_monitor_reading(self):
+        amps = self.poll_meter()
+        meter_reading = self.query_one("#power_info", Static)
+        meter_reading.update(
+            f"Total amps available: {self.total_amps} A\n"
+            f"Current meter reading: {amps} A"
         )
 
     def update_interaction_log(self):
@@ -206,7 +202,7 @@ class DeviceSimulatorApp(App):
     def run_simulation(self):
         while True:
             self.update_device_table()
-            self.update_power_info()
+            self.update_monitor_reading()
             time.sleep(0.2)
 
     def on_input_submitted(self, event):
@@ -244,23 +240,23 @@ class DeviceSimulatorApp(App):
                     break
 
     def poll_meter(self):
-        return sum([device.current_draw for device in self.devices])
+        return sum([device.current_amp_draw for device in self.devices])
 
 
 def main():
     num_evs = int(input("Enter the number of EVs: "))
-    total_power = int(input("Enter the total power available (kW): "))
-    app = DeviceSimulatorApp(total_power)
+    total_amps = int(input("Enter the total amps available (A): "))
+    app = DeviceSimulatorApp(total_amps)
 
     # Assign random priorities and add EVs
     for i in range(num_evs):
-        priority = random.randint(1, num_evs)  # Random priority between 1 and num_evs
-        app.add_device(Device(f"EV{i+1}", 2, 12, True, priority, app))
+        weight = random.randint(1, total_amps)  # Random priority between 1 and num_evs
+        app.add_device(Device(f"EV{i+1}", 6, 48, True, weight, app))
 
     # Add non-EV devices
-    app.add_device(Device("AC", random.randint(2, 12), None, False, None, app))
-    app.add_device(Device("WH", random.randint(2, 12), None, False, None, app))
-    app.add_device(Device("HT", random.randint(2, 12), None, False, None, app))
+    app.add_device(Device("AC", random.randint(20, 50), None, False, None, app))
+    app.add_device(Device("WH", random.randint(20, 50), None, False, None, app))
+    app.add_device(Device("HT", random.randint(20, 50), None, False, None, app))
 
     app.run()
 
