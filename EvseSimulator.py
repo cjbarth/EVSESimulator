@@ -23,6 +23,17 @@ class EventBus:
                 self.subscribers[topic] = []
             self.subscribers[topic].append(callback)
 
+    def unsubscribe(self, topic, callback):
+        with self.lock:
+            if topic in self.subscribers:
+                try:
+                    self.subscribers[topic].remove(callback)
+                except ValueError:
+                    # Nothing to remove, move on
+                    pass
+                if not self.subscribers[topic]:
+                    del self.subscribers[topic]
+
 
 class Device:
     def __init__(
@@ -38,9 +49,13 @@ class Device:
         self.current_amp_draw: int = 0
         self.desired_amp_draw: int = 0
         self.is_on = False
+        self.is_connected = True  # Indicates if the device is connected
         self.waited_cycles = 0
         self.last_heartbeat = 0
         self.lock = threading.Lock()
+
+        if self.is_ev and self.safe_amp_draw < self.min_amp_draw and self.safe_amp_draw > 0:
+            raise ValueError("Safe amperage can't be a non-zero value lower the the specified minimum.")
 
     def set_draw(self, data):
         with self.lock:
@@ -51,71 +66,73 @@ class Device:
                 return
 
             if self.is_ev:  # EV-specific behavior
-                if data:
-                    self.last_heartbeat = time.time()
+                self.last_heartbeat = time.time()
+                if not data:
+                    available_amps = 0
+                    if self.current_amp_draw > self.safe_amp_draw:
+                        self.current_amp_draw = self.safe_amp_draw
+                        self.desired_amp_draw = self.safe_amp_draw
+                    if self.current_amp_draw != self.safe_amp_draw:
+                        available_amps = self.safe_amp_draw
+                else:
+                    available_amps = self.system.total_amps - data["amps"]
 
-                available_amps = (
-                    self.system.total_amps - data["amps"]
-                    if data
-                    else self.safe_amp_draw
-                )
-                if self.current_amp_draw == 0:  # Not drawing power yet
-                    if available_amps >= self.min_amp_draw:
-                        self.desired_amp_draw = min(self.max_amp_draw, available_amps)
-                        self.current_amp_draw = self.min_amp_draw
-                else:  # Already drawing power
-                    if available_amps < 0:  # EVs shed load to accommodate
-                        overdraw = abs(available_amps)
-                        max_delay = 3
-                        if self.waited_cycles > max_delay:
-                            shed_amount = min(overdraw, self.current_amp_draw)
-                            self.waited_cycles = 0
-                        else:
-                            weight_pct = self.weight / self.system.total_amps
-
-                            # Shed my weighted portion of the percent the system is over
-                            weighted_shed_amps = overdraw * (1 - weight_pct)
-
-                            shed_amount = max(1, weighted_shed_amps)
-                            self.waited_cycles += 1
-
-                        self.desired_amp_draw = max(0, self.current_amp_draw - overdraw)
-                        self.current_amp_draw -= shed_amount
-                        if self.current_amp_draw < self.min_amp_draw:
-                            self.desired_amp_draw = 0
-                            self.current_amp_draw = 0
-                    elif (
-                        available_amps > 0 and self.current_amp_draw < self.max_amp_draw
-                    ):  # Power is available, increase demand
-                        # Wait between 0 and 10 cycles
-                        weight_cycles = 10 - (self.weight / self.system.total_amps * 10)
-                        if self.waited_cycles < weight_cycles:
-                            # We have to wait our turn to increase power
-                            self.waited_cycles += 1
-                            return
-                        else:
-                            self.waited_cycles = 0
-
-                        self.desired_amp_draw = min(
-                            self.max_amp_draw,
-                            self.current_amp_draw + available_amps,
-                        )
-
+                if available_amps < 0:  # EVs shed load to accommodate
+                    overdraw = abs(available_amps)
+                    max_delay = 3
+                    if self.waited_cycles > max_delay:
+                        shed_amount = min(overdraw, self.current_amp_draw)
+                        self.waited_cycles = 0
+                    else:
                         weight_pct = self.weight / self.system.total_amps
-                        desired_pct = self.desired_amp_draw / self.current_amp_draw
+
+                        # Shed my weighted portion of the percent the system is over
+                        weighted_shed_amps = overdraw * (1 - weight_pct)
+
+                        shed_amount = max(1, weighted_shed_amps)
+                        self.waited_cycles += 1
+
+                    self.desired_amp_draw = max(0, self.current_amp_draw - overdraw)
+                    self.current_amp_draw -= shed_amount
+                    if self.current_amp_draw < self.min_amp_draw:
+                        self.desired_amp_draw = 0
+                        self.current_amp_draw = 0
+                elif available_amps > 0 and self.current_amp_draw < self.max_amp_draw:
+                    self.desired_amp_draw = min(
+                        self.max_amp_draw,
+                        self.current_amp_draw + available_amps,
+                    )
+                    if self.desired_amp_draw < self.min_amp_draw:
+                        self.desired_amp_draw = self.min_amp_draw
+
+                    # Power is available, increase demand
+                    # Wait between 0 and 10 cycles
+                    weight_cycles = 10 - (self.weight / self.system.total_amps * 10)
+                    if self.waited_cycles < weight_cycles:
+                        # We have to wait our turn to increase power
+                        self.waited_cycles += 1
+                        return
+                    else:
+                        self.waited_cycles = 0
+
+                    if self.current_amp_draw == 0:  # Not drawing power yet
+                        if available_amps >= self.min_amp_draw:
+                            self.current_amp_draw = self.min_amp_draw
+                    else:
+                        weight_pct = self.weight / self.system.total_amps
                         weighted_increase_amps = (
-                            available_amps * desired_pct * weight_pct
-                        )
+                            self.desired_amp_draw - self.current_amp_draw
+                        ) * weight_pct
 
                         increase = max(1, weighted_increase_amps)
                         self.current_amp_draw += increase
                         if self.current_amp_draw > self.max_amp_draw:
                             self.current_amp_draw = self.max_amp_draw
-                    elif available_amps == 0:
-                        self.desired_amp_draw = self.current_amp_draw
+                elif available_amps == 0:
+                    self.desired_amp_draw = self.current_amp_draw
 
-                    self.current_amp_draw = int(self.current_amp_draw)
-                    self.desired_amp_draw = int(self.desired_amp_draw)
+                self.current_amp_draw = int(self.current_amp_draw)
+                self.desired_amp_draw = int(self.desired_amp_draw)
 
             else:  # Non-EV behavior
                 if self.current_amp_draw == 0:
@@ -123,13 +140,13 @@ class Device:
                     self.desired_amp_draw = self.min_amp_draw
 
     def run(self):
-        check_in_period_ms = 3000
+        check_in_period_sec = 3
         if self.is_ev:
             self.system.event_bus.subscribe("meter/data", self.set_draw)
 
         while True:
-            if self.is_ev:
-                if time.time() - check_in_period_ms > self.last_heartbeat:
+            if self.is_ev and self.is_on:
+                if time.time() - check_in_period_sec > self.last_heartbeat:
                     # If it has been too long since we heard from the MQTT server, enter safe mode
                     self.set_draw(None)
             else:
@@ -165,7 +182,7 @@ class DeviceSimulatorApp(App):
     def on_mount(self):
         # Initialize device table
         table = self.query_one("#device_table", DataTable)
-        table.add_column("Device")
+        table.add_column("Device", key="device")
         table.add_column("Status", key="status")
         table.add_column("Current (A)", key="A")
         table.add_column("Min (A)", key="min_draw")
@@ -196,10 +213,10 @@ class DeviceSimulatorApp(App):
 
         for device in self.devices:
             status = "ON" if device.is_on else "OFF"
-            current_draw_str = f"{device.current_amp_draw} A"
-            min_draw_str = f"{device.min_amp_draw} A"
-            desired_draw_str = f"{device.desired_amp_draw} A"
-            max_draw_str = f"{device.max_amp_draw} A"
+            current_draw_str = f"{device.current_amp_draw}"
+            min_draw_str = f"{device.min_amp_draw}"
+            desired_draw_str = f"{device.desired_amp_draw}"
+            max_draw_str = f"{device.max_amp_draw}"
             priority_str = f"{device.weight}" if device.weight is not None else "N/A"
 
             try:
@@ -287,9 +304,33 @@ class DeviceSimulatorApp(App):
                     self.interaction_log.append(
                         f"{device.name} toggled {state} via click."
                     )
-                    self.update_device_table()
-                    self.update_interaction_log()
                     break
+
+        # Ensure we handle clicks only on the "Device" column
+        if column_key == "device":
+            for device in self.devices:
+                if device.name == row_key:
+                    device.is_connected = not device.is_connected
+
+                    # Update UI to reflect connection state
+                    if not device.is_connected:
+                        table.update_cell(
+                            row_key=device.name,
+                            column_key="device",
+                            value=f"[red]{device.name}[/red]",
+                        )
+                        self.event_bus.unsubscribe("meter/data", device.set_draw)
+                        self.interaction_log.append(f"{device.name} disconnected.")
+                    else:
+                        table.update_cell(
+                            row_key=device.name, column_key="device", value=device.name
+                        )
+                        self.event_bus.subscribe("meter/data", device.set_draw)
+                        self.interaction_log.append(f"{device.name} reconnected.")
+                    break
+
+        self.update_device_table()
+        self.update_interaction_log()
 
     def poll_meter(self):
         return sum([device.current_amp_draw for device in self.devices])
