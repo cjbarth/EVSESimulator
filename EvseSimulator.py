@@ -37,7 +37,7 @@ class EventBus:
 
 class Device:
     def __init__(
-        self, name, min_amp_draw, safe_amp_draw, max_amp_draw, is_ev, weight, system
+        self, name: str, min_amp_draw: int, safe_amp_draw: int, max_amp_draw: int, is_ev: bool, weight: int, system
     ):
         self.name = name
         self.min_amp_draw: int = min_amp_draw
@@ -156,14 +156,14 @@ class Device:
 
 
 class DeviceSimulatorApp(App):
-    def __init__(self, total_amps, **kwargs):
+    def __init__(self, total_amps: int, **kwargs):
         super().__init__(**kwargs)
         self.devices: List[Device] = []
         self.total_amps: int = total_amps
         self.interaction_log = []
         self.event_bus = EventBus()
 
-    def add_device(self, device):
+    def add_device(self, device: Device):
         self.devices.append(device)
 
     def compose(self) -> ComposeResult:
@@ -339,17 +339,57 @@ class DeviceSimulatorApp(App):
 def main():
     num_evs = int(input("Enter the number of EVs: "))
     total_amps = int(input("Enter the total amps available (A): "))
-    app = DeviceSimulatorApp(total_amps)
+    app = DeviceSimulatorApp(total_amps=total_amps)
 
     # Assign random priorities and add EVs
     for i in range(num_evs):
         weight = random.randint(1, total_amps)  # Random priority between 1 and num_evs
-        app.add_device(Device(f"EV{i+1}", 6, 6, 48, True, weight, app))
+        app.add_device(
+            Device(
+                name=f"EV{i+1}",
+                min_amp_draw=6,
+                safe_amp_draw=6,
+                max_amp_draw=48,
+                is_ev=True,
+                weight=weight,
+                system=app,
+            )
+        )
 
     # Add non-EV devices
-    app.add_device(Device("AC", random.randint(20, 50), None, None, False, None, app))
-    app.add_device(Device("WH", random.randint(20, 50), None, None, False, None, app))
-    app.add_device(Device("HT", random.randint(20, 50), None, None, False, None, app))
+    app.add_device(
+        Device(
+            name="AC",
+            min_amp_draw=random.randint(20, 50),
+            safe_amp_draw=None,
+            max_amp_draw=None,
+            is_ev=False,
+            weight=None,
+            system=app,
+        )
+    )
+    app.add_device(
+        Device(
+            name="WH",
+            min_amp_draw=random.randint(20, 50),
+            safe_amp_draw=None,
+            max_amp_draw=None,
+            is_ev=False,
+            weight=None,
+            system=app,
+        )
+    )
+    app.add_device(
+        Device(
+            name="HT",
+            min_amp_draw=random.randint(20, 50),
+            safe_amp_draw=None,
+            max_amp_draw=None,
+            is_ev=False,
+            weight=None,
+            system=app,
+        )
+    )
 
     app.run()
 
