@@ -37,7 +37,15 @@ class EventBus:
 
 class Device:
     def __init__(
-        self, name: str, min_amp_draw: int, safe_amp_draw: int, max_amp_draw: int, is_ev: bool, weight: int, system
+        self,
+        name: str,
+        min_amp_draw: int,
+        system,
+        max_amp_draw: int = None,
+        safe_amp_draw: int = 0,
+        is_ev: bool = False,
+        always_draw_min: bool = True,
+        weight: int = 1,
     ):
         self.name = name
         self.min_amp_draw: int = min_amp_draw
@@ -46,6 +54,7 @@ class Device:
         self.weight: int = weight
         self.system: DeviceSimulatorApp = system
         self.is_ev: bool = is_ev
+        self.always_draw_min = always_draw_min
         self.current_amp_draw: int = 0
         self.desired_amp_draw: int = 0
         self.is_on = False
@@ -54,8 +63,14 @@ class Device:
         self.last_heartbeat = 0
         self.lock = threading.Lock()
 
-        if self.is_ev and self.safe_amp_draw < self.min_amp_draw and self.safe_amp_draw > 0:
-            raise ValueError("Safe amperage can't be a non-zero value lower the the specified minimum.")
+        if (
+            self.is_ev
+            and self.safe_amp_draw < self.min_amp_draw
+            and self.safe_amp_draw > 0
+        ):
+            raise ValueError(
+                "Safe amperage can't be a non-zero value lower the the specified minimum."
+            )
 
     def set_draw(self, data):
         with self.lock:
@@ -67,6 +82,11 @@ class Device:
 
             if self.is_ev:  # EV-specific behavior
                 self.last_heartbeat = time.time()
+                if self.always_draw_min and self.current_amp_draw == 0:
+                    # We just turned on and we are told to always draw this no matter the power availability
+                    self.current_amp_draw = self.min_amp_draw
+                    return
+
                 if not data:
                     available_amps = 0
                     if self.current_amp_draw > self.safe_amp_draw:
@@ -92,12 +112,20 @@ class Device:
                         shed_amount = max(1, weighted_shed_amps)
                         self.waited_cycles += 1
 
-                    self.desired_amp_draw = max(0, self.current_amp_draw - overdraw)
+                    self.desired_amp_draw = max(
+                        self.min_amp_draw if self.always_draw_min else 0,
+                        self.current_amp_draw - overdraw,
+                    )
                     self.current_amp_draw -= shed_amount
                     if self.current_amp_draw < self.min_amp_draw:
-                        self.desired_amp_draw = 0
-                        self.current_amp_draw = 0
+                        self.desired_amp_draw = (
+                            self.min_amp_draw if self.always_draw_min else 0
+                        )
+                        self.current_amp_draw = (
+                            self.min_amp_draw if self.always_draw_min else 0
+                        )
                 elif available_amps > 0 and self.current_amp_draw < self.max_amp_draw:
+                    previous_desired_amp_draw = self.desired_amp_draw
                     self.desired_amp_draw = min(
                         self.max_amp_draw,
                         self.current_amp_draw + available_amps,
@@ -105,9 +133,19 @@ class Device:
                     if self.desired_amp_draw < self.min_amp_draw:
                         self.desired_amp_draw = self.min_amp_draw
 
+                    # If available power is unstable (>10% variance), then keep waiting
+                    if (
+                        abs(previous_desired_amp_draw - self.desired_amp_draw)
+                        / self.desired_amp_draw
+                        > 0.1
+                    ):
+                        self.waited_cycles = 0
+
                     # Power is available, increase demand
                     # Wait between 0 and 10 cycles
-                    weight_cycles = 10 - (self.weight / self.system.total_amps * 10)
+                    weight_cycles = 10 - round(
+                        self.weight / self.system.total_amps * 10
+                    )
                     if self.waited_cycles < weight_cycles:
                         # We have to wait our turn to increase power
                         self.waited_cycles += 1
@@ -351,6 +389,7 @@ def main():
                 safe_amp_draw=6,
                 max_amp_draw=48,
                 is_ev=True,
+                always_draw_min=True,
                 weight=weight,
                 system=app,
             )
