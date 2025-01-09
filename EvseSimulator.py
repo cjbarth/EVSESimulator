@@ -151,7 +151,8 @@ class Device:
                         self.waited_cycles += 1
                         return
                     else:
-                        self.waited_cycles = 0
+                        # self.waited_cycles = 0
+                        pass
 
                     if self.current_amp_draw == 0:  # Not drawing power yet
                         if available_amps >= self.min_amp_draw:
@@ -222,6 +223,7 @@ class DeviceSimulatorApp(App):
         table = self.query_one("#device_table", DataTable)
         table.add_column("Device", key="device")
         table.add_column("Status", key="status")
+        table.add_column("Connected", key="connected")
         table.add_column("Current (A)", key="A")
         table.add_column("Min (A)", key="min_draw")
         table.add_column("Desired (A)", key="desired_draw")
@@ -251,6 +253,7 @@ class DeviceSimulatorApp(App):
 
         for device in self.devices:
             status = "ON" if device.is_on else "OFF"
+            connected_status = "Yes" if device.is_connected else "No"
             current_draw_str = f"{device.current_amp_draw}"
             min_draw_str = f"{device.min_amp_draw}"
             desired_draw_str = f"{device.desired_amp_draw}"
@@ -265,6 +268,9 @@ class DeviceSimulatorApp(App):
                 )
                 table.update_cell(
                     row_key=device.name, column_key="status", value=status
+                )
+                table.update_cell(
+                    row_key=device.name, column_key="connected", value=connected_status
                 )
                 table.update_cell(
                     row_key=device.name, column_key="min_draw", value=min_draw_str
@@ -285,6 +291,7 @@ class DeviceSimulatorApp(App):
                 table.add_row(
                     device.name,
                     status,
+                    connected_status,
                     current_draw_str,
                     min_draw_str,
                     desired_draw_str,
@@ -352,17 +359,9 @@ class DeviceSimulatorApp(App):
 
                     # Update UI to reflect connection state
                     if not device.is_connected:
-                        table.update_cell(
-                            row_key=device.name,
-                            column_key="device",
-                            value=f"[red]{device.name}[/red]",
-                        )
                         self.event_bus.unsubscribe("meter/data", device.set_draw)
                         self.interaction_log.append(f"{device.name} disconnected.")
                     else:
-                        table.update_cell(
-                            row_key=device.name, column_key="device", value=device.name
-                        )
                         self.event_bus.subscribe("meter/data", device.set_draw)
                         self.interaction_log.append(f"{device.name} reconnected.")
                     break
