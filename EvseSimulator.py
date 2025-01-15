@@ -1,10 +1,12 @@
+import math
+import random
+import threading
+import time
 from typing import List
+
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Header, Footer, Input, Static, DataTable
-import threading
-import random
-import time
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 
 class EventBus:
@@ -62,6 +64,7 @@ class Device:
         self.waited_cycles = 0
         self.last_heartbeat = 0
         self.lock = threading.Lock()
+        self.carryover_adjustment = 0
 
         if (
             self.is_ev
@@ -85,6 +88,7 @@ class Device:
                 if self.always_draw_min and self.current_amp_draw == 0:
                     # We just turned on and we are told to always draw this no matter the power availability
                     self.current_amp_draw = self.min_amp_draw
+                    self.desired_amp_draw = self.min_amp_draw
                     return
 
                 if not data:
@@ -107,9 +111,13 @@ class Device:
                         weight_pct = self.weight / self.system.total_amps
 
                         # Shed my weighted portion of the percent the system is over
-                        weighted_shed_amps = overdraw * (1 - weight_pct)
+                        (_, weighted_shed_amps) = math.modf(overdraw * (1 - weight_pct))
 
-                        shed_amount = max(1, weighted_shed_amps)
+                        shed_amount = weighted_shed_amps
+                        self.system.interaction_log.append(
+                            f"{self.name} shedding {shed_amount}"
+                        )
+                        self.system.update_interaction_log()
                         self.waited_cycles += 1
 
                     self.desired_amp_draw = max(
@@ -124,7 +132,7 @@ class Device:
                         self.current_amp_draw = (
                             self.min_amp_draw if self.always_draw_min else 0
                         )
-                elif available_amps > 0 and self.current_amp_draw < self.max_amp_draw:
+                elif available_amps >= 0 and self.current_amp_draw < self.max_amp_draw:
                     previous_desired_amp_draw = self.desired_amp_draw
                     self.desired_amp_draw = min(
                         self.max_amp_draw,
@@ -139,39 +147,55 @@ class Device:
                         / self.desired_amp_draw
                         > 0.1
                     ):
-                        self.waited_cycles = 0
+                        return
 
                     # Power is available, increase demand
-                    # Wait between 0 and 10 cycles
-                    weight_cycles = 10 - round(
-                        self.weight / self.system.total_amps * 10
-                    )
-                    if self.waited_cycles < weight_cycles:
-                        # We have to wait our turn to increase power
-                        self.waited_cycles += 1
-                        return
-                    else:
-                        # self.waited_cycles = 0
-                        pass
 
-                    if self.current_amp_draw == 0:  # Not drawing power yet
-                        if available_amps >= self.min_amp_draw:
-                            self.current_amp_draw = self.min_amp_draw
-                    else:
-                        weight_pct = self.weight / self.system.total_amps
-                        weighted_increase_amps = (
-                            self.desired_amp_draw - self.current_amp_draw
-                        ) * weight_pct
+                    # Try to increase demand based on priority
+                    weight_pct = self.weight / self.system.total_amps
+                    random_pct = random.randint(0, 0xFFFFFFFF) / 0xFFFFFFFF
+                    if random_pct < weight_pct:
+                        # We "rolled" a high enough value, we can increase draw.
 
-                        increase = max(1, weighted_increase_amps)
-                        self.current_amp_draw += increase
-                        if self.current_amp_draw > self.max_amp_draw:
-                            self.current_amp_draw = self.max_amp_draw
-                elif available_amps == 0:
-                    self.desired_amp_draw = self.current_amp_draw
+                        # # Wait between 0 and 10 cycles
+                        # weight_cycles = 10 - round(
+                        #     self.weight / self.system.total_amps * 10
+                        # )
+                        # if self.waited_cycles < weight_cycles:
+                        #     # We have to wait our turn to increase power
+                        #     self.waited_cycles += 1
+                        #     return
+                        # else:
+                        #     # self.waited_cycles = 0
+                        #     pass
 
-                self.current_amp_draw = int(self.current_amp_draw)
-                self.desired_amp_draw = int(self.desired_amp_draw)
+                        if self.current_amp_draw == 0:  # Not drawing power yet
+                            if available_amps >= self.min_amp_draw:
+                                self.current_amp_draw = self.min_amp_draw
+                        else:
+                            weighted_increase_amps = (
+                                self.desired_amp_draw - self.current_amp_draw
+                            ) * weight_pct
+
+                            (self.carryover_adjustment, increase) = math.modf(
+                                weighted_increase_amps + self.carryover_adjustment
+                            )
+
+                            # if weighted_increase_amps > 0:
+                            #     increase = 1
+                            # else:
+                            #     increase = 0
+                            # increase =  min(1, math.ceil(weighted_increase_amps))
+                            # increase = weighted_increase_amps
+                            # increase = 1
+                            self.current_amp_draw += min(1, increase)
+                            if self.current_amp_draw > self.max_amp_draw:
+                                self.current_amp_draw = self.max_amp_draw
+                # elif available_amps == 0:
+                #     self.desired_amp_draw = self.current_amp_draw
+
+                # self.current_amp_draw = int(self.current_amp_draw)
+                # self.desired_amp_draw = int(self.desired_amp_draw)
 
             else:  # Non-EV behavior
                 if self.current_amp_draw == 0:
