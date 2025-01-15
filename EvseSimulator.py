@@ -157,18 +157,6 @@ class Device:
                     if random_pct < weight_pct:
                         # We "rolled" a high enough value, we can increase draw.
 
-                        # # Wait between 0 and 10 cycles
-                        # weight_cycles = 10 - round(
-                        #     self.weight / self.system.total_amps * 10
-                        # )
-                        # if self.waited_cycles < weight_cycles:
-                        #     # We have to wait our turn to increase power
-                        #     self.waited_cycles += 1
-                        #     return
-                        # else:
-                        #     # self.waited_cycles = 0
-                        #     pass
-
                         if self.current_amp_draw == 0:  # Not drawing power yet
                             if available_amps >= self.min_amp_draw:
                                 self.current_amp_draw = self.min_amp_draw
@@ -181,21 +169,9 @@ class Device:
                                 weighted_increase_amps + self.carryover_adjustment
                             )
 
-                            # if weighted_increase_amps > 0:
-                            #     increase = 1
-                            # else:
-                            #     increase = 0
-                            # increase =  min(1, math.ceil(weighted_increase_amps))
-                            # increase = weighted_increase_amps
-                            # increase = 1
                             self.current_amp_draw += min(1, increase)
                             if self.current_amp_draw > self.max_amp_draw:
                                 self.current_amp_draw = self.max_amp_draw
-                # elif available_amps == 0:
-                #     self.desired_amp_draw = self.current_amp_draw
-
-                # self.current_amp_draw = int(self.current_amp_draw)
-                # self.desired_amp_draw = int(self.desired_amp_draw)
 
             else:  # Non-EV behavior
                 if self.current_amp_draw == 0:
